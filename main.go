@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,6 +55,9 @@ const maxResponseBytes = 10 * 1024 * 1024 // 10 MB
 // httpTimeout sets the maximum duration for HTTP requests.
 const httpTimeout = 30 * time.Second
 
+// cmdTimeout sets the maximum duration for command execution.
+const cmdTimeout = 30 * time.Second
+
 func main() {
 	if len(os.Args) < 4 {
 		fmt.Fprintf(os.Stderr, "Usage: %s <command> <output-file> <data-url>\n", os.Args[0])
@@ -87,7 +89,9 @@ func main() {
 		}
 	}
 
-	out, err := exec.Command(parts[0], args...).Output()
+	cmdCtx, cmdCancel := context.WithTimeout(context.Background(), cmdTimeout)
+	defer cmdCancel()
+	out, err := exec.CommandContext(cmdCtx, parts[0], args...).Output()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "command error: %v\n", err)
 		os.Exit(1)
@@ -99,18 +103,40 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := validateURL(dataURL); err != nil {
-		fmt.Fprintf(os.Stderr, "URL validation error: %v\n", err)
-		os.Exit(1)
+	// Use a custom transport with DialContext to enforce SSRF protection at
+	// connection time, eliminating the DNS rebinding TOCTOU gap.
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, fmt.Errorf("invalid address %s: %v", addr, err)
+			}
+			ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+			if err != nil {
+				return nil, fmt.Errorf("DNS resolution failed for %s: %v", host, err)
+			}
+			for _, ipAddr := range ips {
+				if isPrivateIP(ipAddr.IP) {
+					return nil, fmt.Errorf("blocked private/link-local IP %s for host %s", ipAddr.IP, host)
+				}
+			}
+			// Dial using the first validated IP to prevent re-resolution.
+			dialAddr := net.JoinHostPort(ips[0].IP.String(), port)
+			return (&net.Dialer{}).DialContext(ctx, network, dialAddr)
+		},
 	}
-
-	client := &http.Client{Timeout: httpTimeout}
+	client := &http.Client{Transport: transport, Timeout: httpTimeout}
 	resp, err := client.Get(dataURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "http error: %v\n", err)
 		os.Exit(1)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		fmt.Fprintf(os.Stderr, "http error: unexpected status %d %s\n", resp.StatusCode, resp.Status)
+		os.Exit(1)
+	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
@@ -150,27 +176,6 @@ func isPrivateIP(ip net.IP) bool {
 	return false
 }
 
-// validateURL resolves the hostname and rejects URLs pointing to private/link-local IPs
-// to prevent SSRF attacks against internal services.
-func validateURL(rawURL string) error {
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return fmt.Errorf("invalid URL: %v", err)
-	}
-	host := parsed.Hostname()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-	if err != nil {
-		return fmt.Errorf("DNS resolution failed for %s: %v", host, err)
-	}
-	for _, ipAddr := range ips {
-		if isPrivateIP(ipAddr.IP) {
-			return fmt.Errorf("URL resolves to private/link-local IP %s — rejected to prevent SSRF", ipAddr.IP)
-		}
-	}
-	return nil
-}
 
 func writeFile(path string, data []byte) error {
 	cleanPath := filepath.Clean(path)

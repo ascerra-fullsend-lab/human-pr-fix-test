@@ -60,9 +60,8 @@ func TestWriteFile(t *testing.T) {
 
 		err := writeFile("escape/pwned.txt", []byte("bad"))
 		if err == nil {
+			os.Remove("/tmp/pwned.txt") // Clean up in case it was written
 			t.Fatal("expected error for symlink escape, got nil")
-			// Clean up in case it was written
-			os.Remove("/tmp/pwned.txt")
 		}
 	})
 }
@@ -201,7 +200,7 @@ func TestWriteFileSymlinkBoundary(t *testing.T) {
 
 	err := writeFile("escape/pwned.txt", []byte("bad"))
 	if err == nil {
+		os.Remove("/tmp/pwned.txt") // Clean up in case it was written
 		t.Fatal("expected error for symlink escape, got nil")
-		os.Remove("/tmp/pwned.txt")
 	}
 }
