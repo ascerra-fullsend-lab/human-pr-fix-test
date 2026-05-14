@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -156,4 +157,51 @@ func TestCommandPolicies(t *testing.T) {
 			t.Fatal("echo should not restrict arguments")
 		}
 	})
+}
+
+func TestIsPrivateIP(t *testing.T) {
+	tests := []struct {
+		name    string
+		ip      string
+		private bool
+	}{
+		{"loopback", "127.0.0.1", true},
+		{"private 10.x", "10.0.0.1", true},
+		{"private 172.16.x", "172.16.0.1", true},
+		{"private 192.168.x", "192.168.1.1", true},
+		{"link-local", "169.254.1.1", true},
+		{"public", "8.8.8.8", false},
+		{"public 2", "93.184.216.34", false},
+		{"ipv6 loopback", "::1", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ip := net.ParseIP(tt.ip)
+			if ip == nil {
+				t.Fatalf("failed to parse IP %s", tt.ip)
+			}
+			got := isPrivateIP(ip)
+			if got != tt.private {
+				t.Errorf("isPrivateIP(%s) = %v, want %v", tt.ip, got, tt.private)
+			}
+		})
+	}
+}
+
+func TestWriteFileSymlinkBoundary(t *testing.T) {
+	// Regression test: ensure prefix matching doesn't allow "/application"
+	// when cwd is "/app" — uses filepath.Rel instead of HasPrefix.
+	dir := t.TempDir()
+	origDir, _ := os.Getwd()
+	defer os.Chdir(origDir)
+	os.Chdir(dir)
+
+	// Create a symlink pointing outside the working directory
+	os.Symlink("/tmp", filepath.Join(dir, "escape"))
+
+	err := writeFile("escape/pwned.txt", []byte("bad"))
+	if err == nil {
+		t.Fatal("expected error for symlink escape, got nil")
+		os.Remove("/tmp/pwned.txt")
+	}
 }

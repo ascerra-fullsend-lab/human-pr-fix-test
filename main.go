@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +32,8 @@ var allowedCommands = map[string]commandPolicy{
 
 // validatePathArgs checks that all arguments are safe relative paths (no absolute paths,
 // no path traversal, no flag injection).
+// Note: argument parsing uses strings.Fields which splits on whitespace — quoted
+// arguments (e.g., echo "hello world") are not supported.
 func validatePathArgs(args []string) error {
 	for _, arg := range args {
 		if strings.HasPrefix(arg, "-") {
@@ -87,11 +92,15 @@ func main() {
 		fmt.Fprintf(os.Stderr, "command error: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Fprint(os.Stderr, string(out))
 
 	dataURL := os.Args[3]
 	if !strings.HasPrefix(dataURL, "https://") {
 		fmt.Fprintf(os.Stderr, "data URL must use HTTPS: %s\n", dataURL)
+		os.Exit(1)
+	}
+
+	if err := validateURL(dataURL); err != nil {
+		fmt.Fprintf(os.Stderr, "URL validation error: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -108,12 +117,59 @@ func main() {
 		fmt.Fprintf(os.Stderr, "read error: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Fprint(os.Stderr, string(body))
 
-	if err := writeFile(os.Args[2], body); err != nil {
+	// Combine command output and fetched data into the output file.
+	combined := append(out, body...)
+	if err := writeFile(os.Args[2], combined); err != nil {
 		fmt.Fprintf(os.Stderr, "write error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// isPrivateIP returns true if the IP is in a private, loopback, or link-local range.
+func isPrivateIP(ip net.IP) bool {
+	privateRanges := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"127.0.0.0/8",
+		"169.254.0.0/16",
+		"::1/128",
+		"fc00::/7",
+		"fe80::/10",
+	}
+	for _, cidr := range privateRanges {
+		_, network, err := net.ParseCIDR(cidr)
+		if err != nil {
+			continue
+		}
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// validateURL resolves the hostname and rejects URLs pointing to private/link-local IPs
+// to prevent SSRF attacks against internal services.
+func validateURL(rawURL string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %v", err)
+	}
+	host := parsed.Hostname()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return fmt.Errorf("DNS resolution failed for %s: %v", host, err)
+	}
+	for _, ipAddr := range ips {
+		if isPrivateIP(ipAddr.IP) {
+			return fmt.Errorf("URL resolves to private/link-local IP %s — rejected to prevent SSRF", ipAddr.IP)
+		}
+	}
+	return nil
 }
 
 func writeFile(path string, data []byte) error {
@@ -129,7 +185,8 @@ func writeFile(path string, data []byte) error {
 		if err != nil {
 			return fmt.Errorf("cannot resolve output directory: %v", err)
 		}
-		// After resolving, ensure we haven't escaped via symlink.
+		// Use filepath.Rel to verify the resolved path stays within cwd.
+		// This avoids the prefix-matching pitfall where "/app" matches "/application".
 		absResolved, err := filepath.Abs(resolvedDir)
 		if err != nil {
 			return fmt.Errorf("cannot resolve absolute path: %v", err)
@@ -138,7 +195,11 @@ func writeFile(path string, data []byte) error {
 		if err != nil {
 			return fmt.Errorf("cannot determine working directory: %v", err)
 		}
-		if !strings.HasPrefix(absResolved, cwd) {
+		rel, err := filepath.Rel(cwd, absResolved)
+		if err != nil {
+			return fmt.Errorf("cannot compute relative path: %v", err)
+		}
+		if strings.HasPrefix(rel, "..") {
 			return fmt.Errorf("output path escapes working directory via symlink: %s", path)
 		}
 		cleanPath = filepath.Join(resolvedDir, filepath.Base(cleanPath))
