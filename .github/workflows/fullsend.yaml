@@ -1,3 +1,4 @@
+# cache-bust: 1
 # fullsend shim workflow — with human-PR fix agent gating
 name: fullsend
 
