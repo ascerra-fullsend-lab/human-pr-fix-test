@@ -98,14 +98,13 @@ jobs:
           EVENT_TYPE: ${{ github.event_name }}
           SOURCE_REPO: ${{ github.repository }}
           DISPATCH_REPO: ${{ github.repository_owner }}/.fullsend
-          TRIGGER_USER: ${{ github.event.review.user.login }}
         run: |
           gh workflow run fix.yml \
             --repo "$DISPATCH_REPO" \
             --field event_type="$EVENT_TYPE" \
             --field source_repo="$SOURCE_REPO" \
             --field event_payload="$EVENT_PAYLOAD" \
-            --field trigger_source="$TRIGGER_USER"
+            --field trigger_source="bot"
 
   dispatch-fix-human:
     runs-on: ubuntu-latest
@@ -156,14 +155,13 @@ jobs:
           EVENT_TYPE: ${{ github.event_name }}
           SOURCE_REPO: ${{ github.repository }}
           DISPATCH_REPO: ${{ github.repository_owner }}/.fullsend
-          TRIGGER_USER: ${{ github.event.comment.user.login }}
         run: |
           gh workflow run fix.yml \
             --repo "$DISPATCH_REPO" \
             --field event_type="$EVENT_TYPE" \
             --field source_repo="$SOURCE_REPO" \
             --field event_payload="$EVENT_PAYLOAD" \
-            --field trigger_source="$TRIGGER_USER"
+            --field trigger_source="human"
 
   dispatch-stop-fix:
     runs-on: ubuntu-latest
